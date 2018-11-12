@@ -494,7 +494,7 @@ class Arima():
                 # Make a prediction
                 forecast = fitted_model.forecast(steps=self.n, alpha=0.01)
 
-                # Don't make too many predictions
+                # Dont make too many predictions
                 if index + self.n < len(df[test_start:]):
                     repeats = self.n
                 else:
@@ -1052,7 +1052,7 @@ class Arima():
                 queues[i][0].put(futures[i])
                 logging.info('Main process sent data to {}'.format(names[i]))
 
-                # TODO part where you're supposed to add in more data
+                # TODO part where you are supposed to add in more data
                 futures[i] = None
 
     def static_analysis(self, df: pd.DataFrame, outages) -> None:
