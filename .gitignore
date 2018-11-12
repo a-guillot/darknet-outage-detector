@@ -1,0 +1,15 @@
+figs/*pdf
+*py.swp
+pickles/*
+csv/*csv
+credentials.py
+__pycache__
+results/*pkl
+all.txt
+out.err
+nohup.out
+mail.conf
+.mypy_cache
+logs/logs.log
+all_countries.pkl
+live_results/*pkl
