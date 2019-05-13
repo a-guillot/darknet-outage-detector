@@ -48,7 +48,7 @@ class Chocolatine():
 
     This program parses all arguments and sets every configuration file before
     analyzing the ground truth dataset on Internet outages. Each network event
-    is imported from the 'ground_truth.conf' and is analysed with the
+    is imported from the 'gt-validation.conf' and is analysed with the
     parameters contained inside the corresponding section.
     """
 
@@ -75,7 +75,8 @@ class Chocolatine():
         self.save = args.save
         self.plot = args.plot
         self.mail = args.mail
-        self.ground_truth = args.ground_truth
+        self.gt_validation = args.gt_validation
+        self.gt_comparison = args.gt_comparison
         self.validation = args.validation
         self.results_dir = 'results/'
         self.gt_dir = 'combined_ground_truth/'
@@ -173,12 +174,22 @@ class Chocolatine():
             help='Send mail when results have been generated'
         )
 
-        # Analyze the ground truth
+        # Analyze the ground truth for calibration
         parser.add_argument(
             '-g',
-            '--ground-truth',
+            '--gt-validation',
             action='store_true',
-            help='Analyze the ground truth and save results to pickle files'
+            help='Analyze the calibration ground truth and save results to '
+            'pickle files'
+        )
+
+        # Analyze the ground truth for comparison
+        parser.add_argument(
+            '-G',
+            '--gt-comparison',
+            action='store_true',
+            help='Analyze the comparison ground truth and save results to '
+            'pickle files'
         )
 
         return parser
@@ -205,7 +216,7 @@ class Chocolatine():
     def get_section_info(self, config: configparser.SectionProxy) -> Iterator:
         """
         Returns the info that's stored inside every section of
-        'ground_truth.conf'.
+        'gt-validation.conf'.
 
         The info is stored in different forms depending of the type of data.
         json.loads is used to read lists and booleans. Most values are default
@@ -231,7 +242,16 @@ class Chocolatine():
              ]
         )
 
-    def analyze_sections(self, config: configparser.ConfigParser) -> None:
+    def get_comp_info(self, config: configparser.SectionProxy) -> Iterator:
+        return map(
+            json.loads,
+            [config['signals'], config['test_time'], config['bgp'],
+             config['ap'], config['dn']
+             ]
+        )
+
+    def analyze_sections(self, config: configparser.ConfigParser,
+                         validation=True) -> None:
         """
         For each section: get data, perform ARIMA, report outages.
 
@@ -269,39 +289,40 @@ class Chocolatine():
         # Unique id to identify plots
         index = 0
 
-        logging.info('Started to analyze the CAIDA files.')
+        if validation:
+            logging.info('Started to analyze the CAIDA files.')
 
-        for gt_file in os.listdir('ground_truth_caida/'):
-            logging.info('Analyzing file {}'.format(gt_file))
+            for gt_file in os.listdir('ground_truth_caida/'):
+                logging.info('Analyzing file {}'.format(gt_file))
 
-            # Load events into dataframe and keep outages
-            gt = pd.read_csv('ground_truth_caida/' + gt_file)
-            gt = gt[gt['GT'] == 1] # Remove if you want every single file
+                # Load events into dataframe and keep outages
+                gt = pd.read_csv('ground_truth_caida/' + gt_file)
+                gt = gt[gt['GT'] == 1] # Remove if you want every single file
 
-            # Date prefix
-            prefix = get_date_prefix(gt_file)
+                # Date prefix
+                prefix = get_date_prefix(gt_file)
 
-            # Analyze each event
-            for index, row in gt.iterrows():
-                signals = [str(row['ASN'])]
-                test_time = [
-                    prefix + row['Time'].split('-')[0],
-                    prefix + row['Time'].split('-')[1]
-                ]
-                outages = {signals[0]: test_time}
+                # Analyze each event
+                for index, row in gt.iterrows():
+                    signals = [str(row['ASN'])]
+                    test_time = [
+                        prefix + row['Time'].split('-')[0],
+                        prefix + row['Time'].split('-')[1]
+                    ]
+                    outages = {signals[0]: test_time}
 
-                # Get the corresponding dataframes
-                df = Ioda().get_dataframe(signals, test_time)
+                    # Get the corresponding dataframes
+                    df = Ioda().get_dataframe(signals, test_time)
 
-                arima = Arima(test_time, n, difference_order, arima_order,
-                              save, plot, index, thresholds)
+                    arima = Arima(test_time, n, difference_order, arima_order,
+                                save, plot, index, thresholds)
 
-                arima.static_analysis(df[signals[0]], outages)
-                index += 1
+                    arima.static_analysis(df[signals[0]], outages)
+                    index += 1
 
-                logging.info('Added an event for AS {}'.format(signals[0]))
+                    logging.info('Added an event for AS {}'.format(signals[0]))
 
-        logging.info('Finished analyzing the CAIDA files.')
+            logging.info('Finished analyzing the CAIDA files.')
 
         logging.info('Starting to analyze sections')
 
@@ -651,7 +672,7 @@ class Chocolatine():
 
         # Get default values
         config = configparser.ConfigParser()
-        config.read('ground_truth.conf')
+        config.read('gt-validation.conf')
 
         (_, _, _, n, difference_order, arima_order, save,
          plot, thresholds) = (
@@ -663,11 +684,118 @@ class Chocolatine():
 
         arima.live_analysis(df)
 
+    def get_arima_data(self, signal, index):
+        for ts in os.listdir(self.results_dir):
+            if signal[0].replace('.', '_') not in ts:
+                continue
+
+            # treating cases with two entries
+            if str(index[-1].timestamp()) not in ts:
+                continue
+
+            df = pd.read_pickle(self.results_dir + ts)
+            df = df[index][df > 1]
+
+            return df
+
+        logging.error('Did not find the file!! Exiting...')
+        sys.exit(1)
+
+    def generate_comparison(self):
+        def get_df(index, data):
+            df = pd.DataFrame(data=[False,] * len(index), index=index)
+
+            if isinstance(data, list):
+                for time_period in data:
+                    i = pd.date_range(time_period[0], time_period[1],
+                                      freq='5min')
+                    try:
+                        df.loc[i] = True
+                    except(KeyError):
+                        import IPython
+                        IPython.embed(header='key error generate comp')
+            else:
+                df.loc[data.index] = True
+
+            return df
+
+        def combine(df):
+            res1 = {
+                'BGP': len(df.query('BGP & ~AP & ~DN')),
+                'AP': len(df.query('AP & ~BGP & ~DN')),
+                'DN': len(df.query('DN & ~BGP & ~AP')),
+                'BGP + AP': len(df.query('BGP & AP & ~DN')),
+                'BGP + DN': len(df.query('BGP & ~AP & DN')),
+                'AP + DN': len(df.query('~BGP & AP & DN')),
+                'BGP + AP + DN': len(df.query('BGP & AP & DN')),
+            }
+            res2 = {
+                'BGP': len(df.query('BGP & ~AP & ~AR')),
+                'AP': len(df.query('~BGP & AP & ~AR')),
+                'AR': len(df.query('~BGP & ~AP & AR')),
+                'BGP + AP': len(df.query('BGP & AP & ~AR')),
+                'BGP + AR': len(df.query('BGP & ~AP & AR')),
+                'AP + AR': len(df.query('~BGP & AP & AR')),
+                'BGP + AP + AR': len(df.query('BGP & AP & AR')),
+            }
+
+            return res1, res2
+
+        config = configparser.ConfigParser()
+        config.read('gt-comparison.conf')
+
+        results = {}
+        results['DN'] = {
+            'BGP': 0, 'AP': 0, 'DN': 0, 'BGP + AP': 0,'BGP + DN': 0,
+            'AP + DN': 0, 'BGP + AP + DN': 0,
+        }
+        results['AR'] = {
+            'BGP': 0, 'AP': 0,'AR': 0, 'BGP + AP': 0,
+            'BGP + AR': 0, 'AP + AR': 0,
+            'BGP + AP + AR': 0,
+        }
+
+        for section in config.sections():
+            logging.info('Analyzing section "{}"'.format(section))
+
+            (signals, test_time, bgp, ap, dn) = (
+                self.get_comp_info(config[section])
+            )
+            index = pd.date_range(test_time[0], test_time[1], freq='5min')
+
+            # Gather arima data for this period
+            ar = self.get_arima_data(signals, index)
+
+            df = pd.DataFrame(index=index)
+
+            df['BGP'] = get_df(index, bgp)
+            df['AP'] = get_df(index, ap)
+            df['DN'] = get_df(index, dn)
+            df['AR'] = get_df(index, ar)
+
+            # Combine everything
+            res1, res2 = combine(df)
+
+            # Add globally
+            for k in res1:
+                results['DN'][k] += res1[k]
+            for k in res2:
+                results['AR'][k] += res2[k]
+
+            # Add locally
+            results[section] = [res1, res2]
+
+            # Analysis of the AR only
+            index = df.query('AR & ~BGP & ~AP').index
+
+        with open('comp.pkl', 'wb') as fp:
+            pickle.dump(results, fp)
+
     def main(self) -> None:
         """
-        Perform analysis of the ground truth present in 'ground_truth.conf'.
+        Perform analysis of the ground truth present in 'gt-validation.conf'.
 
-        Load data from every network event described in 'ground_truth.conf' and
+        Load data from every network event described in 'gt-validation.conf' and
         try to detect outages in it. Outages that detected inside a period
         marked as an outage are considered true positives and the others are
         false positiives.
@@ -676,13 +804,21 @@ class Chocolatine():
         if self.validation:
             logging.info('Perform validation')
 
-            if self.ground_truth:
-                # Extract config from ground_truth.conf
+            if self.gt_validation:
+                # Extract config from gt-validation.conf
                 config = configparser.ConfigParser()
-                config.read('ground_truth.conf')
+                config.read('gt-validation.conf')
 
                 self.analyze_sections(config)
 
+            if self.gt_comparison:
+                # Extract config from gt-validation.conf
+                config = configparser.ConfigParser()
+                config.read('gt-comparison.conf')
+
+                self.analyze_sections(config, validation=False)
+
+            self.generate_comparison()
             self.generate_roc_curves()
         else:
             logging.info('Performing live analysis')
